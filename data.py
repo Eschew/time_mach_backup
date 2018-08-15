@@ -71,6 +71,38 @@ class WebCamData():
                 
         # Unset seed
         random.seed()
+        
+    def get_random_pair(self, date):
+        # ordered such that a occurs before b
+        # returns tuple (imid_a, imid_b, ohe_time_a, ohe_time_b) by hour
+        files = list(self.dates_by_time[date].keys())
+        st_a = random.choice(files)
+        st_b = random.choice(files)
+        
+        if st_a > st_b:
+            # future occurs before present, swap them
+            st_b, st_a = st_a, st_b
+        ida = random.choice(self.dates_by_time[date][st_a])
+        idb = random.choice(self.dates_by_time[date][st_b])
+        
+        ida_ = ida.split("/")[-1]
+        idb_ = idb.split("/")[-1]
+        
+        minutes_a = int(ida_.split("_")[1])
+        minutes_b = int(idb_.split("_")[1])
+        hours_a = int(ida_.split("_")[0])
+        hours_b = int(idb_.split("_")[0])
+        
+        time_a = np.zeros((25, )) # hours + minutes / 60
+        time_b = np.zeros((25, )) # hours + minutes / 60
+        
+        time_a[hours_a] = 1.
+        time_b[hours_b] = 1.
+        
+        time_a[24] = minutes_a / 60.
+        time_b[24] = minutes_b / 60.
+        
+        return ida, idb, time_a, time_b
     
     def get_valid_pairs_dist_apart(self, date, dist, margin):
         # dist hours +/- margin min is valid training example
@@ -144,6 +176,38 @@ class WebCamData():
         #         print(dist - margin)
         #         1/0.
         return inds
+    
+    def batch_variable_data_with_dates(self, batch_size,
+                                       splits='train', patch_size=None):
+        if patch_size is None:
+            # use full-res
+            crop = False
+        else:
+            crop = True
+            
+        # incldue caching
+        splits_date = self.splits[splits]
+        
+        current, future, current_date, future_date = [], [], [], []
+        for i in range(batch_size):
+            d = random.choice(splits_date)
+            imid_a, imid_b, time_a, time_b = self.get_random_pair(d)
+            
+            im_a = process_im(skio.imread(imid_a).astype(np.float32))
+            im_b = process_im(skio.imread(imid_b).astype(np.float32))
+        
+            if crop:
+                im_a, im_b = paired_random_crop(im_a, im_b, patch_size)
+            current.append(im_a)
+            future.append(im_b)
+            current_date.append([time_a])
+            future_date.append([time_b])
+            
+        return (np.stack(current, axis=0),
+                np.stack(future, axis=0),
+                np.stack(current_date, axis=0),
+                np.stack(future_date, axis=0))
+            
             
     
     def batch_constant_data(self, batch_size, dist, margin=5.,
@@ -172,7 +236,6 @@ class WebCamData():
         
         for i in range(batch_size):
             d = random.choice(list(self.valid_examples[splits].keys()))
-            training_pair = random.choice(self.valid_examples[splits][d])
             
             im_a_id = random.choice(self.dates_by_time[d][training_pair[0]])
             im_b_id = random.choice(self.dates_by_time[d][training_pair[1]])
@@ -186,9 +249,4 @@ class WebCamData():
             future.append(im_b)
             
         return np.stack(current, axis=0), np.stack(future, axis=0)
-            
-            
-    
-    
-            
         

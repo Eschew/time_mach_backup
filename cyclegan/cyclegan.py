@@ -6,6 +6,8 @@ from generator import Generator
 
 REAL_LABEL = 0.9
 
+
+
 class CycleGAN:
   def __init__(self,
                batch_size=1,
@@ -16,7 +18,8 @@ class CycleGAN:
                lambda2=10,
                learning_rate=2e-4,
                beta1=0.5,
-               ngf=64
+               ngf=64,
+               use_gpu=0
               ):
     """
     Args:
@@ -32,6 +35,10 @@ class CycleGAN:
       beta1: float, momentum term of Adam
       ngf: number of gen filters in first conv layer
     """
+    if type(use_gpu) is int:
+        use_gpu = [use_gpu]
+    self.use_gpu = use_gpu
+    
     self.lambda1 = lambda1
     self.lambda2 = lambda2
     self.use_lsgan = use_lsgan
@@ -40,7 +47,9 @@ class CycleGAN:
     self.image_size = image_size
     self.learning_rate = learning_rate
     self.beta1 = beta1
-
+    
+    self.opt = self.make_optimizer()
+    
     self.is_training = tf.placeholder_with_default(True, shape=[], name='is_training')
 
     self.G = Generator('G', self.is_training, ngf=ngf, norm=norm, image_size=image_size)
@@ -56,68 +65,108 @@ class CycleGAN:
         shape=[batch_size, image_size, image_size, 3])
 
   def model(self, inp_x, inp_y):
+    G_opt_grads = []
+    D_Y_opt_grads = []
+    F_opt_grads = []
+    D_X_opt_grads = []
+    
+    fake_x_list = tf.split(self.fake_x, len(self.use_gpu))
+    fake_y_list = tf.split(self.fake_y, len(self.use_gpu))
+    inp_x_list = tf.split(inp_x, len(self.use_gpu))
+    inp_y_list = tf.split(inp_y, len(self.use_gpu))
+    
+    tot_G_loss = 0.
+    tot_F_loss = 0.
+    tot_D_Y_loss = 0.
+    tot_D_X_loss = 0.
+    
+    fake_xs = []
+    fake_ys = []
+    
+    with tf.variable_scope(tf.get_variable_scope()):
+      for i, gpu_id in enumerate(self.use_gpu):
+        print('Initializing graph on gpu %i' % gpu_id)
+        with tf.device('/gpu:%d' % gpu_id):
+          pooled_fake_x = fake_x_list[i]
+          pooled_fake_y = fake_y_list[i]
+          inp_x = inp_x_list[i]
+          inp_y = inp_y_list[i]
+          
+          cycle_loss = self.cycle_consistency_loss(self.G, self.F, inp_x, inp_y)
 
-    cycle_loss = self.cycle_consistency_loss(self.G, self.F, inp_x, inp_y)
+          # X -> Y
+          fake_y = self.G(inp_x)
+          fake_ys.append(fake_y)
+        
+          G_gan_loss = self.generator_loss(self.D_Y, fake_y, use_lsgan=self.use_lsgan)
+          G_loss =  G_gan_loss + cycle_loss
+          D_Y_loss = self.discriminator_loss(self.D_Y, inp_y, pooled_fake_y, use_lsgan=self.use_lsgan)
 
-    # X -> Y
-    fake_y = self.G(inp_x)
-    G_gan_loss = self.generator_loss(self.D_Y, fake_y, use_lsgan=self.use_lsgan)
-    G_loss =  G_gan_loss + cycle_loss
-    D_Y_loss = self.discriminator_loss(self.D_Y, inp_y, self.fake_y, use_lsgan=self.use_lsgan)
+          # Y -> X
+          fake_x = self.F(inp_y)
+          fake_xs.append(fake_x)
+          
+          F_gan_loss = self.generator_loss(self.D_X, fake_x, use_lsgan=self.use_lsgan)
+          F_loss = F_gan_loss + cycle_loss
+          D_X_loss = self.discriminator_loss(self.D_X, inp_x, pooled_fake_x, use_lsgan=self.use_lsgan)
+        
+          tot_F_loss += G_loss
+          tot_D_X_loss += D_X_loss
+          tot_G_loss += G_loss
+          tot_D_Y_loss += D_Y_loss
+          
+          tf.get_variable_scope().reuse_variables()
+          
+          G_opt_grads.append(self.opt.compute_gradients(G_loss, var_list=self.G.variables))
+          F_opt_grads.append(self.opt.compute_gradients(F_loss, var_list=self.F.variables))
+          D_Y_opt_grads.append(self.opt.compute_gradients(D_Y_loss, var_list=self.D_Y.variables))
+          D_X_opt_grads.append(self.opt.compute_gradients(D_X_loss, var_list=self.D_X.variables))
+    G_grads = ops.average_gradients(G_opt_grads)
+    F_grads = ops.average_gradients(F_opt_grads)
+    D_Y_grads = ops.average_gradients(D_Y_opt_grads)
+    D_X_grads = ops.average_gradients(D_X_opt_grads)
+    
+    G_ts = self.opt.apply_gradients(G_grads, global_step=self.global_step)
+    F_ts = self.opt.apply_gradients(F_grads, global_step=self.global_step)
+    D_Y_ts = self.opt.apply_gradients(D_Y_grads, global_step=self.global_step)
+    D_X_ts = self.opt.apply_gradients(D_X_grads, global_step=self.global_step)
+    
+    with tf.control_dependencies([G_ts, D_Y_ts, F_ts, D_X_ts]):
+      ts = tf.no_op(name='optimizers')
+    
+    fake_x = tf.concat(fake_xs, axis=0)
+    fake_y = tf.concat(fake_ys, axis=0)
+    
+    num_gpu = max(1., len(self.use_gpu) + 0.)
 
-    # Y -> X
-    fake_x = self.F(inp_y)
-    F_gan_loss = self.generator_loss(self.D_X, fake_x, use_lsgan=self.use_lsgan)
-    F_loss = F_gan_loss + cycle_loss
-    D_X_loss = self.discriminator_loss(self.D_X, inp_x, self.fake_x, use_lsgan=self.use_lsgan)
+    return (tot_G_loss/num_gpu, tot_D_Y_loss/num_gpu,
+            tot_F_loss/num_gpu, tot_D_X_loss/num_gpu,
+            fake_y, fake_x, ts)
 
-#     # summary
-#     tf.summary.histogram('D_Y/true', self.D_Y(inp_y))
-#     tf.summary.histogram('D_Y/fake', self.D_Y(self.G(inp_x)))
-#     tf.summary.histogram('D_X/true', self.D_X(inp_x))
-#     tf.summary.histogram('D_X/fake', self.D_X(self.F(inp_y)))
+  def make_optimizer(self, name='Adam'):
+    """ Adam optimizer with learning rate 0.0002 for the first 100k steps (~100 epochs)
+        and a linearly decaying rate that goes to zero over the next 100k steps
+    """
+    self.global_step = tf.Variable(0, trainable=False)
+    starter_learning_rate = self.learning_rate
+    end_learning_rate = 0.0
+    start_decay_step = 100000
+    decay_steps = 100000
+    beta1 = self.beta1
+    learning_rate = (
+        tf.where(
+                tf.greater_equal(self.global_step, start_decay_step),
+                tf.train.polynomial_decay(starter_learning_rate, self.global_step-start_decay_step,
+                                          decay_steps, end_learning_rate,
+                                          power=1.0),
+                starter_learning_rate
+        )
 
-#     tf.summary.scalar('loss/G', G_gan_loss)
-#     tf.summary.scalar('loss/D_Y', D_Y_loss)
-#     tf.summary.scalar('loss/F', F_gan_loss)
-#     tf.summary.scalar('loss/D_X', D_X_loss)
-#     tf.summary.scalar('loss/cycle', cycle_loss)
+    )
 
-#     tf.summary.image('X/generated', utils.batch_convert2int(self.G(x)))
-#     tf.summary.image('X/reconstruction', utils.batch_convert2int(self.F(self.G(x))))
-#     tf.summary.image('Y/generated', utils.batch_convert2int(self.F(y)))
-#     tf.summary.image('Y/reconstruction', utils.batch_convert2int(self.G(self.F(y))))
-
-    return G_loss, D_Y_loss, F_loss, D_X_loss, fake_y, fake_x
+    return tf.train.AdamOptimizer(learning_rate, beta1=beta1, name=name)
 
   def optimize(self, G_loss, D_Y_loss, F_loss, D_X_loss):
-    def make_optimizer(loss, variables, name='Adam'):
-      """ Adam optimizer with learning rate 0.0002 for the first 100k steps (~100 epochs)
-          and a linearly decaying rate that goes to zero over the next 100k steps
-      """
-      global_step = tf.Variable(0, trainable=False)
-      starter_learning_rate = self.learning_rate
-      end_learning_rate = 0.0
-      start_decay_step = 100000
-      decay_steps = 100000
-      beta1 = self.beta1
-      learning_rate = (
-          tf.where(
-                  tf.greater_equal(global_step, start_decay_step),
-                  tf.train.polynomial_decay(starter_learning_rate, global_step-start_decay_step,
-                                            decay_steps, end_learning_rate,
-                                            power=1.0),
-                  starter_learning_rate
-          )
-
-      )
-      tf.summary.scalar('learning_rate/{}'.format(name), learning_rate)
-
-      learning_step = (
-          tf.train.AdamOptimizer(learning_rate, beta1=beta1, name=name)
-                  .minimize(loss, global_step=global_step, var_list=variables)
-      )
-      return learning_step
 
     G_optimizer = make_optimizer(G_loss, self.G.variables, name='Adam_G')
     D_Y_optimizer = make_optimizer(D_Y_loss, self.D_Y.variables, name='Adam_D_Y')
