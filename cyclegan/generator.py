@@ -12,7 +12,7 @@ class Generator:
     self.image_size = image_size
     self.output_channel = output_channel
 
-  def __call__(self, input):
+  def __call__(self, input, desired_tile_time):
     """
     Args:
       input: batch_size x width x height x 3
@@ -20,6 +20,7 @@ class Generator:
       output: same size as input
     """
     with tf.variable_scope(self.name):
+      input = tf.concat([input, desired_tile_time], axis=-1)
       # conv layers
       c7s1_32 = ops.c7s1_k(input, self.ngf, is_training=self.is_training, norm=self.norm,
           reuse=self.reuse, name='c7s1_32')                             # (?, w, h, 32)
@@ -33,7 +34,7 @@ class Generator:
         res_output = ops.n_res_blocks(d128, reuse=self.reuse, n=6)      # (?, w/4, h/4, 128)
       else:
         # 9 blocks for higher resolution
-        res_output = ops.n_res_blocks(d128, reuse=self.reuse, n=9)      # (?, w/4, h/4, 128)
+        res_output = ops.n_res_blocks(d128, reuse=self.reuse, n=6)      # (?, w/4, h/4, 128)
 
       # fractional-strided convolution
       u64 = ops.uk(res_output, 2*self.ngf, is_training=self.is_training, norm=self.norm,

@@ -26,6 +26,22 @@ def paired_random_crop(im_a, im_b, size):
     
     return im_as, im_bs
 
+def unpaired_random_crop(im_a, im_b, size):
+    # h x w x 3
+    h, w, d = im_a.shape
+    h_ = random.randint(0, h - size - 1)
+    w_ = random.randint(0, w - size - 1)
+    h_b = random.randint(0, h - size - 1)
+    w_b = random.randint(0, w - size - 1)
+    return (im_a[h_:h_ + size,
+                 w_:w_ + size, :],
+            im_b[h_b:h_b + size,
+                 w_b:w_b + size, :])
+    
+
+    
+    return im_as, im_bs
+
 
 class WebCamData():
     
@@ -49,8 +65,8 @@ class WebCamData():
             self.dates_by_time[d] = collections.defaultdict(list)
             
             for im in os.listdir(os.path.join(self.data_dir, "%s/%s"%(webcam_id, d))):
-                if int(im.split("_")[0]) < 8 or int(im.split("_")[0]) > 15:
-                    continue
+                # if int(im.split("_")[0]) < 8 or int(im.split("_")[0]) > 15:
+                #     continue
                 # sorted by minutes from beginning
                 self.dates_by_time[d][60. * int(im.split("_")[0]) + int(im.split("_")[1])].append(
                     os.path.join(self.data_dir, "%s/%s/%s"%(webcam_id, d, im)))
@@ -102,7 +118,9 @@ class WebCamData():
         time_a[24] = minutes_a / 60.
         time_b[24] = minutes_b / 60.
         
-        return ida, idb, time_a, time_b
+        return (ida, idb,
+                time_a.astype(np.float32),
+                time_b.astype(np.float32))
     
     def get_valid_pairs_dist_apart(self, date, dist, margin):
         # dist hours +/- margin min is valid training example
@@ -177,7 +195,7 @@ class WebCamData():
         #         1/0.
         return inds
     
-    def batch_variable_data_with_dates(self, batch_size,
+    def batch_variable_data_with_dates(self, batch_size, paired=True,
                                        splits='train', patch_size=None):
         if patch_size is None:
             # use full-res
@@ -197,11 +215,14 @@ class WebCamData():
             im_b = process_im(skio.imread(imid_b).astype(np.float32))
         
             if crop:
-                im_a, im_b = paired_random_crop(im_a, im_b, patch_size)
+                if paired:
+                    im_a, im_b = paired_random_crop(im_a, im_b, patch_size)
+                else:
+                    im_a, im_b = unpaired_random_crop(im_a, im_b, patch_size)
             current.append(im_a)
             future.append(im_b)
-            current_date.append([time_a])
-            future_date.append([time_b])
+            current_date.append(time_a)
+            future_date.append(time_b)
             
         return (np.stack(current, axis=0),
                 np.stack(future, axis=0),
